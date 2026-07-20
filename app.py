@@ -143,6 +143,48 @@ def enrich():
         return jsonify({"rows": [], "error": str(e)}), 200
 
 
+@app.route("/api/diag")
+def diag():
+    """
+    Диагностика. Откройте в браузере:
+      /api/diag?lead=36316        — проверить конкретный лид
+      /api/diag                   — общая проверка (сколько всего сделок с LEAD_ID)
+    Показывает сырой ответ Bitrix, чтобы понять, почему сделки не находятся.
+    """
+    out = {}
+    lead_id = request.args.get("lead")
+    try:
+        # 1. общая проверка: сколько сделок в CRM вообще имеют заполненный LEAD_ID
+        deals_with_lead = bx("crm.deal.list", {
+            "filter": {"!LEAD_ID": ""},
+            "select": ["ID", "TITLE", "LEAD_ID", "STAGE_ID"],
+            "start": 0
+        }) or []
+        out["сделок_с_заполненным_LEAD_ID_(первая_страница)"] = len(deals_with_lead)
+        out["примеры_таких_сделок"] = deals_with_lead[:5]
+    except Exception as e:
+        out["ошибка_общей_проверки"] = str(e)
+
+    if lead_id:
+        try:
+            # 2. ищем сделки этого лида по LEAD_ID
+            by_lead = bx("crm.deal.list", {
+                "filter": {"LEAD_ID": lead_id},
+                "select": ["ID", "TITLE", "STAGE_ID", "LEAD_ID", "OPPORTUNITY", "CONTACT_ID"]
+            }) or []
+            out[f"сделки_по_LEAD_ID={lead_id}"] = by_lead
+
+            # 3. смотрим сам лид и его контакты
+            lead = bx("crm.lead.get", {"id": lead_id})
+            out["лид"] = {k: lead.get(k) for k in ["ID", "TITLE", "STATUS_ID", "NAME"]} if lead else None
+            contacts = bx("crm.lead.contact.items.get", {"id": lead_id}) or []
+            out["контакты_лида"] = contacts
+        except Exception as e:
+            out[f"ошибка_по_лиду_{lead_id}"] = str(e)
+
+    return jsonify(out)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
