@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: crm-bitrix-dashboard
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn server:app
+    envVars:
+      - key: BITRIX_WEBHOOK
+        sync: false

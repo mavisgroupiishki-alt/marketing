@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CRM: Лиды → Сделки (Bitrix)</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f7;padding:20px;color:#1f2937}
+  .wrap{max-width:1500px;margin:0 auto}
+  .card{background:#fff;border-radius:12px;padding:22px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+  h1{font-size:22px;margin-bottom:6px}
+  .sub{color:#6b7280;font-size:13px;margin-bottom:18px}
+  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  input[type=file]{display:none}
+  .lbl{padding:9px 16px;background:#4f46e5;color:#fff;border-radius:7px;cursor:pointer;font-size:14px;font-weight:500}
+  .lbl:hover{background:#4338ca}
+  .fname{font-size:12px;color:#6b7280}
+  button{padding:9px 18px;border:0;border-radius:7px;cursor:pointer;font-size:14px;font-weight:500;color:#fff;background:#059669}
+  button:hover{background:#047857}
+  button.exp{background:#d97706}
+  button.exp:hover{background:#b45309}
+  button.ghost{background:#6b7280}
+  button:disabled{background:#cbd5e1;cursor:not-allowed}
+  .alert{padding:12px 14px;border-radius:7px;font-size:13px;margin-bottom:10px}
+  .a-err{background:#fef2f2;color:#991b1b;border:1px solid #fecaca}
+  .a-ok{background:#f0fdf4;color:#166534;border:1px solid #bbf7d0}
+  .a-info{background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe}
+  .wh{font-size:12px;padding:6px 10px;border-radius:6px;display:inline-block}
+  .wh.ok{background:#f0fdf4;color:#166534}
+  .wh.bad{background:#fef2f2;color:#991b1b}
+  .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px}
+  .m{background:#fff;border-radius:10px;padding:16px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+  .m .l{font-size:11px;text-transform:uppercase;color:#6b7280;font-weight:600;margin-bottom:6px}
+  .m .v{font-size:28px;font-weight:700;color:#4f46e5}
+  .m .v.green{color:#059669}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  .tw{overflow:auto;max-height:640px}
+  th{background:#f9fafb;padding:10px;text-align:left;font-weight:600;position:sticky;top:0;border-bottom:2px solid #e5e7eb;white-space:nowrap}
+  td{padding:9px 10px;border-bottom:1px solid #f0f0f0;vertical-align:top}
+  tr:hover{background:#fafafa}
+  .bdg{display:inline-block;padding:3px 9px;border-radius:14px;font-size:11px;font-weight:600;white-space:nowrap}
+  .b-q{background:#dbeafe;color:#1e40af}
+  .b-nr{background:#fee2e2;color:#991b1b}
+  .b-deal{background:#dcfce7;color:#166534}
+  .b-none{background:#f3f4f6;color:#9ca3af}
+  h2{font-size:17px;display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;gap:10px;flex-wrap:wrap}
+  .hint{font-size:12px;color:#6b7280;margin-top:8px}
+  .how{font-size:10px;color:#9ca3af}
+  progress{width:220px;height:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="card">
+    <h1>CRM — лиды и их сделки (из Bitrix24)</h1>
+    <div class="sub">Загрузите выгрузку лидов. Сделки подтягиваются напрямую из вашего Bitrix по вебхуку: сначала по LEAD_ID, затем по контакту, затем по названию.</div>
+    <div id="whStatus" class="wh">Проверяю связь с Bitrix…</div>
+    <div id="alerts" style="margin-top:12px"></div>
+    <div class="row" style="margin-top:12px">
+      <label class="lbl">📁 Выгрузка лидов<input type="file" id="fLeads" accept=".xlsx,.xls" onchange="fn()"></label>
+      <span class="fname" id="nLeads">файл не выбран</span>
+      <button id="btnRun" onclick="run()">Подтянуть сделки из Bitrix</button>
+      <button class="ghost" onclick="wipe()">Очистить</button>
+    </div>
+    <div class="row" id="progWrap" style="margin-top:12px;display:none">
+      <progress id="prog" max="100" value="0"></progress>
+      <span class="fname" id="progTxt"></span>
+    </div>
+    <div class="hint">Поиск идёт по каждому лиду отдельно, поэтому на 40+ лидов уйдёт полминуты-минута — это нормально (ограничение скорости Bitrix API).</div>
+  </div>
+
+  <div class="metrics" id="metrics" style="display:none">
+    <div class="m"><div class="l">Лидов</div><div class="v" id="mLeads">0</div></div>
+    <div class="m"><div class="l">Со сделкой</div><div class="v green" id="mLinked">0</div></div>
+    <div class="m"><div class="l">Конверсия</div><div class="v green" id="mConv">0%</div></div>
+    <div class="m"><div class="l">Сумма сделок, BYN</div><div class="v" id="mSum">0</div></div>
+  </div>
+
+  <div class="card" id="reportCard" style="display:none">
+    <h2>Список все лиды и статусы
+      <button class="exp" onclick="xls()">📥 Скачать в Excel</button>
+    </h2>
+    <div class="tw">
+      <table>
+        <thead><tr>
+          <th>ID лида</th><th>ID сделки</th><th>Стадия</th><th>Источник</th>
+          <th>Стадия сделки на дату</th><th>Сумма сделка, BYN</th><th>Название лида</th><th>Имя</th>
+          <th>Дата создания ЛИДА</th><th>Ответственный</th>
+          <th>UTM Source</th><th>UTM Medium</th><th>UTM Campaign</th><th>UTM Content</th><th>UTM Term</th>
+        </tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+let LEADS=[];   // прочитанные из файла лиды
+let ROWS=[];    // результат после обогащения
+
+function alert_(msg,type){const d=document.createElement('div');d.className='alert '+(type==='err'?'a-err':(type==='info'?'a-info':'a-ok'));d.textContent=msg;document.getElementById('alerts').appendChild(d);setTimeout(()=>d.remove(),8000);}
+function fn(){const f=document.getElementById('fLeads').files[0];document.getElementById('nLeads').textContent=f?('✓ '+f.name):'файл не выбран';}
+function col(row,names){if(!row)return null;for(const n of names){if(row[n]!==undefined&&row[n]!==null&&row[n]!=='')return row[n];}return null;}
+function fmtDate(v){if(v===null||v===undefined||v==='')return '';if(typeof v==='number'){const t=Math.round((v-25569)*86400*1000);return new Date(t).toISOString().substring(0,10);}return String(v).substring(0,10);}
+
+// проверка вебхука при загрузке
+window.addEventListener('load', async ()=>{
+  try{
+    const r=await fetch('/api/webhook-status');
+    const j=await r.json();
+    const el=document.getElementById('whStatus');
+    if(j.ok){el.className='wh ok';el.textContent='✓ Bitrix подключён'+(j.user&&j.user.NAME?(' ('+j.user.NAME+' '+(j.user.LAST_NAME||'')+')'):'');}
+    else{el.className='wh bad';el.textContent='✕ Bitrix не отвечает: '+(j.error||'');}
+  }catch(e){
+    const el=document.getElementById('whStatus');el.className='wh bad';
+    el.textContent='✕ Сервер не запущен. Запустите server.py и откройте http://localhost:8000';
+  }
+});
+
+function readXls(file){return new Promise((res,rej)=>{const r=new FileReader();r.onload=e=>{try{const wb=XLSX.read(e.target.result,{type:'array'});const sh=wb.Sheets[wb.SheetNames[0]];res(XLSX.utils.sheet_to_json(sh,{defval:''}));}catch(err){rej(err);}};r.onerror=()=>rej(new Error('не читается'));r.readAsArrayBuffer(file);});}
+
+async function run(){
+  const f=document.getElementById('fLeads').files[0];
+  if(!f){alert_('Выберите файл лидов','err');return;}
+  try{
+    LEADS=await readXls(f);
+    if(!LEADS.length){alert_('Файл лидов пуст','err');return;}
+  }catch(e){alert_('Ошибка чтения файла: '+e.message,'err');return;}
+
+  const btn=document.getElementById('btnRun');btn.disabled=true;
+  document.getElementById('progWrap').style.display='flex';
+  document.getElementById('prog').value=5;
+  document.getElementById('progTxt').textContent='Запрашиваю сделки из Bitrix для '+LEADS.length+' лидов…';
+
+  try{
+    const r=await fetch('/api/enrich',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({leads:LEADS})});
+    if(!r.ok){throw new Error('сервер вернул '+r.status);}
+    const j=await r.json();
+    ROWS=j.rows||[];
+    document.getElementById('prog').value=100;
+    document.getElementById('progTxt').textContent='Готово';
+    render();
+    const linked=ROWS.filter(x=>x['ID сделки']&&x['ID сделки']!=='-').length;
+    alert_('Обработано '+ROWS.length+' лидов, найдено сделок: '+linked,'ok');
+    if(j.errors&&j.errors.length){alert_('Часть лидов с ошибками ('+j.errors.length+'). Подробности в консоли сервера.','info');}
+  }catch(e){
+    alert_('Ошибка обращения к серверу: '+e.message,'err');
+  }finally{
+    btn.disabled=false;
+    setTimeout(()=>{document.getElementById('progWrap').style.display='none';document.getElementById('prog').value=0;},1500);
+  }
+}
+
+function stageBadge(stage){
+  const s=String(stage||'');
+  if(!s||s==='—'||s==='-')return '<span class="bdg b-none">—</span>';
+  let cls='b-q';
+  if(/нецел|отказ|брак|\bнр\b/i.test(s))cls='b-nr';
+  return '<span class="bdg '+cls+'">'+s+'</span>';
+}
+
+function render(){
+  const linked=ROWS.filter(x=>x['ID сделки']&&x['ID сделки']!=='-').length;
+  const sum=ROWS.reduce((a,x)=>{const v=parseFloat(x['Сумма сделка, BYN']||0);return a+(isNaN(v)?0:v);},0);
+  document.getElementById('metrics').style.display='grid';
+  document.getElementById('reportCard').style.display='block';
+  document.getElementById('mLeads').textContent=ROWS.length;
+  document.getElementById('mLinked').textContent=linked;
+  document.getElementById('mConv').textContent=(ROWS.length?Math.round(linked/ROWS.length*100):0)+'%';
+  document.getElementById('mSum').textContent=Math.round(sum).toLocaleString('ru-RU');
+
+  const tb=document.getElementById('tbody');tb.innerHTML='';
+  ROWS.forEach(x=>{
+    const hasDeal=x['ID сделки']&&x['ID сделки']!=='-';
+    const tr=tb.insertRow();
+    tr.innerHTML=`
+      <td><b>${x['ID лида']||''}</b></td>
+      <td>${x['ID сделки']||'-'}${x._how?(' <span class="how">'+x._how+'</span>'):''}</td>
+      <td>${stageBadge(x['Стадия'])}</td>
+      <td>${x['Источник']||''}</td>
+      <td>${hasDeal?('<span class="bdg b-deal">'+(x['Стадия сделки на дату']||'')+'</span>'):'<span class="bdg b-none">—</span>'}</td>
+      <td>${x['Сумма сделка, BYN']||''}</td>
+      <td>${String(x['Название лида']||'').substring(0,40)}</td>
+      <td>${x['Имя']||''}</td>
+      <td>${fmtDate(x['Дата создания ЛИДА'])}</td>
+      <td>${x['Ответственный']||''}</td>
+      <td>${x['UTM Source']||''}</td>
+      <td>${x['UTM Medium']||''}</td>
+      <td>${x['UTM Campaign']||''}</td>
+      <td>${x['UTM Content']||''}</td>
+      <td>${x['UTM Term']||''}</td>`;
+  });
+}
+
+function xls(){
+  if(!ROWS.length){alert_('Сначала подтяните сделки','err');return;}
+  const data=ROWS.map(x=>({
+    'ID лида':x['ID лида']||'',
+    'ID сделки':x['ID сделки']||'-',
+    'Стадия':x['Стадия']||'',
+    'Источник':x['Источник']||'',
+    'Стадия сделки на дату':x['Стадия сделки на дату']||'-',
+    'Сумма сделка, BYN':x['Сумма сделка, BYN']||'',
+    'Название лида':x['Название лида']||'',
+    'Имя':x['Имя']||'',
+    'Дата создания ЛИДА':fmtDate(x['Дата создания ЛИДА']),
+    'Ответственный':x['Ответственный']||'',
+    'UTM Source':x['UTM Source']||'',
+    'UTM Medium':x['UTM Medium']||'',
+    'UTM Campaign':x['UTM Campaign']||'',
+    'UTM Content':x['UTM Content']||'',
+    'UTM Term':x['UTM Term']||''
+  }));
+  const wb=XLSX.utils.book_new();
+  const ws=XLSX.utils.json_to_sheet(data);
+  ws['!cols']=[{wch:9},{wch:9},{wch:18},{wch:30},{wch:22},{wch:14},{wch:30},{wch:16},{wch:18},{wch:20},{wch:12},{wch:10},{wch:20},{wch:22},{wch:20}];
+  XLSX.utils.book_append_sheet(wb,ws,'Список лиды');
+  XLSX.writeFile(wb,'Список_лиды_'+new Date().toISOString().substring(0,10)+'.xlsx');
+  alert_('Файл скачан','ok');
+}
+
+function wipe(){LEADS=[];ROWS=[];document.getElementById('fLeads').value='';document.getElementById('nLeads').textContent='файл не выбран';document.getElementById('metrics').style.display='none';document.getElementById('reportCard').style.display='none';}
+</script>
+</body>
+</html>
