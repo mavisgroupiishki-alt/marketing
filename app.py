@@ -1,19 +1,14 @@
 """
-CRM дашборд + Bitrix24 — версия для хостинга на Render.
+CRM дашборд + Bitrix24 — версия для Render.
+Вебхук берётся из переменной окружения BITRIX_WEBHOOK.
 
-Вебхук берётся из переменной окружения BITRIX_WEBHOOK
-(задаётся в настройках Render, в код не пишется).
-
-Локально тоже можно:
-    export BITRIX_WEBHOOK="https://mavisgroup.bitrix24.by/rest/2110/xxxx/"
-    pip install -r requirements.txt
-    gunicorn server:app         (или: python server.py)
+Обработка идёт ПАЧКАМИ: фронт присылает лидов по несколько штук,
+для каждой пачки делается один пакетный вызов Bitrix (метод batch),
+поэтому запрос укладывается в лимит времени Render.
 """
 
 from flask import Flask, request, jsonify, render_template
-from flask_cors import CORS
 import requests
-import time
 import os
 
 WEBHOOK = (os.environ.get("BITRIX_WEBHOOK") or "").rstrip("/")
@@ -21,29 +16,27 @@ if WEBHOOK:
     WEBHOOK += "/"
 
 app = Flask(__name__)
-CORS(app)
 
 _STATUS_CACHE = {}
 
 
-def bx(method, params=None, retries=3):
+def bx(method, params=None):
     if not WEBHOOK:
-        raise RuntimeError("BITRIX_WEBHOOK не задан. Добавьте переменную окружения в настройках Render.")
-    url = WEBHOOK + method
-    for attempt in range(retries):
-        try:
-            r = requests.post(url, json=params or {}, timeout=30)
-            data = r.json()
-        except Exception:
-            if attempt == retries - 1:
-                raise
-            time.sleep(0.6)
-            continue
-        if "error" in data:
-            raise RuntimeError(f"{method}: {data.get('error')} — {data.get('error_description')}")
-        time.sleep(0.3)
-        return data.get("result")
-    return None
+        raise RuntimeError("BITRIX_WEBHOOK не задан на сервере (переменная окружения).")
+    r = requests.post(WEBHOOK + method, json=params or {}, timeout=25)
+    data = r.json()
+    if "error" in data:
+        raise RuntimeError(f"{method}: {data.get('error')} — {data.get('error_description')}")
+    return data.get("result")
+
+
+def bx_batch(cmds):
+    if not WEBHOOK:
+        raise RuntimeError("BITRIX_WEBHOOK не задан на сервере.")
+    r = requests.post(WEBHOOK + "batch", json={"halt": 0, "cmd": cmds}, timeout=25)
+    data = r.json()
+    result = (data.get("result") or {})
+    return result.get("result", {})
 
 
 def load_status_maps():
@@ -51,8 +44,7 @@ def load_status_maps():
     if _STATUS_CACHE:
         return _STATUS_CACHE
     try:
-        rows = bx("crm.status.list", {"order": {"SORT": "ASC"},
-                                      "select": ["ENTITY_ID", "STATUS_ID", "NAME"]}) or []
+        rows = bx("crm.status.list", {"select": ["ENTITY_ID", "STATUS_ID", "NAME"]}) or []
     except Exception:
         rows = []
     m = {}
@@ -62,12 +54,12 @@ def load_status_maps():
     return m
 
 
-def stage_name(entity_hint, code):
+def stage_name(code):
     if code in (None, "", "-"):
         return ""
     maps = load_status_maps()
     for (ent, c), name in maps.items():
-        if str(c) == str(code) and (entity_hint in ent):
+        if str(c) == str(code) and "DEAL_STAGE" in ent:
             return name
     for (ent, c), name in maps.items():
         if str(c) == str(code):
@@ -79,41 +71,49 @@ def _pick_latest(deals):
     try:
         return sorted(deals, key=lambda d: d.get("DATE_CREATE", ""), reverse=True)[0]
     except Exception:
-        return deals[0]
+        return deals[0] if deals else None
 
 
-def find_deal_for_lead(lead_id, lead_title):
-    select = ["ID", "TITLE", "STAGE_ID", "OPPORTUNITY", "CURRENCY_ID", "DATE_CREATE", "SOURCE_ID", "CATEGORY_ID"]
-
-    try:
-        deals = bx("crm.deal.list", {"filter": {"LEAD_ID": lead_id}, "select": select}) or []
-        if deals:
-            return _pick_latest(deals), "по LEAD_ID"
-    except Exception:
-        pass
+def enrich_batch(leads):
+    select = ["ID", "TITLE", "STAGE_ID", "OPPORTUNITY", "DATE_CREATE"]
+    cmds = {}
+    for i, L in enumerate(leads):
+        lead_id = L.get("ID") or L.get("Id") or L.get("id")
+        q = "crm.deal.list?" + f"filter[LEAD_ID]={lead_id}&" + "&".join([f"select[]={f}" for f in select])
+        cmds[f"d{i}"] = q
 
     try:
-        contacts = bx("crm.lead.contact.items.get", {"id": lead_id}) or []
-        for c in contacts:
-            cid = c.get("CONTACT_ID")
-            if not cid:
-                continue
-            deals = bx("crm.deal.list", {"filter": {"CONTACT_ID": cid}, "select": select}) or []
-            if deals:
-                return _pick_latest(deals), "по контакту"
+        res = bx_batch(cmds) if cmds else {}
     except Exception:
-        pass
+        res = {}
 
-    try:
-        title = (lead_title or "").strip()
-        if title and not title.startswith("+375") and "Входящий звонок" not in title and "Лид с формы" not in title:
-            deals = bx("crm.deal.list", {"filter": {"%TITLE": title}, "select": select}) or []
-            if deals:
-                return _pick_latest(deals), "по названию"
-    except Exception:
-        pass
+    rows = []
+    for i, L in enumerate(leads):
+        lead_id = L.get("ID") or L.get("Id") or L.get("id")
+        lead_title = L.get("Название лида") or L.get("TITLE") or ""
+        deals = res.get(f"d{i}") or []
+        deal = _pick_latest(deals) if deals else None
+        how = "по LEAD_ID" if deal else ""
 
-    return None, ""
+        rows.append({
+            "ID лида": lead_id or "",
+            "ID сделки": (deal.get("ID") if deal else "-"),
+            "Стадия": L.get("Стадия") or "",
+            "Источник": L.get("Источник") or "",
+            "Стадия сделки на дату": (stage_name(deal.get("STAGE_ID")) if deal else "-"),
+            "Сумма сделка, BYN": (deal.get("OPPORTUNITY") if deal else ""),
+            "Название лида": lead_title,
+            "Имя": L.get("Имя") or "",
+            "Дата создания ЛИДА": L.get("Дата создания") or "",
+            "Ответственный": L.get("Ответственный") or "",
+            "UTM Source": L.get("UTM Source") or "",
+            "UTM Medium": L.get("UTM Medium") or "",
+            "UTM Campaign": L.get("UTM Campaign") or "",
+            "UTM Content": L.get("UTM Content") or "",
+            "UTM Term": L.get("UTM Term") or "",
+            "_how": how,
+        })
+    return rows
 
 
 @app.route("/")
@@ -136,37 +136,11 @@ def webhook_status():
 def enrich():
     payload = request.json or {}
     leads = payload.get("leads", [])
-    out, errors = [], []
-
-    for L in leads:
-        lead_id = L.get("ID") or L.get("Id") or L.get("id")
-        lead_title = L.get("Название лида") or L.get("TITLE") or ""
-        deal, how = None, ""
-        try:
-            deal, how = find_deal_for_lead(lead_id, lead_title)
-        except Exception as e:
-            errors.append(f"Лид {lead_id}: {e}")
-
-        out.append({
-            "ID лида": lead_id or "",
-            "ID сделки": (deal.get("ID") if deal else "-"),
-            "Стадия": L.get("Стадия") or "",
-            "Источник": L.get("Источник") or "",
-            "Стадия сделки на дату": (stage_name("DEAL_STAGE", deal.get("STAGE_ID")) if deal else "-"),
-            "Сумма сделка, BYN": (deal.get("OPPORTUNITY") if deal else ""),
-            "Название лида": lead_title,
-            "Имя": L.get("Имя") or "",
-            "Дата создания ЛИДА": L.get("Дата создания") or "",
-            "Ответственный": L.get("Ответственный") or "",
-            "UTM Source": L.get("UTM Source") or "",
-            "UTM Medium": L.get("UTM Medium") or "",
-            "UTM Campaign": L.get("UTM Campaign") or "",
-            "UTM Content": L.get("UTM Content") or "",
-            "UTM Term": L.get("UTM Term") or "",
-            "_how": how,
-        })
-
-    return jsonify({"rows": out, "errors": errors})
+    try:
+        rows = enrich_batch(leads)
+        return jsonify({"rows": rows})
+    except Exception as e:
+        return jsonify({"rows": [], "error": str(e)}), 200
 
 
 if __name__ == "__main__":
